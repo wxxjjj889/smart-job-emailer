@@ -1,0 +1,20 @@
+{
+  "email": "your_email@example.com",
+  "auth_code": "your_smtp_auth_code",
+  "resume_path": "",
+  "personal": {
+    "name": "张三",
+    "phone": "13800138000",
+    "school": "XX大学",
+    "internship_duration": "实习3个月",
+    "arrival_time": "随时到岗",
+    "weekly_attendance": "每周5天",
+    "undergrad_school": "",
+    "grad_school": "",
+    "undergrad_major": "",
+    "grad_major": "",
+    "graduation_time": "2028毕业",
+    "grade": "研0"
+  },
+  "tutorial_shown": false
+}
