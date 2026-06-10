@@ -646,29 +646,25 @@ def extract_info(text):
                 result["naming_format"] = raw
                 break
 
-    # ---- 策略2：匹配引号内的命名格式 ----
+    # ---- 策略2：匹配引号内的命名格式（要求引号前必须有命名关键词） ----
     if not result["naming_format"]:
-        quote_kw = (
-            r"(?:简历|邮件|文件|附件)?\s*"
-            r"(?:(?:及|和|与)?\s*(?:简历|邮件|文件|附件)?\s*"
-            r"(?:标题|主题|命名|名称|文件名|格式))?\s*"
-            r"(?:请|请以|请用|请将|请按|请按照|请注明|请写明|请标注|"
-            r"请统一|请务必|请设置为|请写为|请命名为)?\s*"
-            r"(?:命名|文件名|名称|格式|标题|主题|格式为|命名为|"
-            r"统一格式|命名格式|邮件主题|邮件标题|简历命名|文件命名)?\s*"
-            r"[：:是为]?\s*"
-        )
-        quote_pat = quote_kw + r"[\"“”「」『』‘’《》](.+?)[\"“”「」『』‘’《》]"
+        NAMING_KW = {"命名", "文件名", "名称", "格式", "标题", "主题",
+                     "简历命名", "邮件主题", "邮件标题", "文件命名", "附件命名"}
+        QUOTE_CHARS = r"[\"“”「」『』‘’《》]"
         for line in text.split("\n"):
             line = line.strip()
             if not line:
                 continue
-            m = re.search(quote_pat, line, re.IGNORECASE)
-            if m:
-                fmt = _clean_format(m.group(m.lastindex or 1))
-                if 2 < len(fmt) < 60:
-                    result["naming_format"] = fmt
-                    break
+            for m in re.finditer(QUOTE_CHARS + r"(.+?)" + QUOTE_CHARS, line):
+                content = m.group(1)
+                prefix = line[:m.start()]
+                if any(kw in prefix for kw in NAMING_KW):
+                    fmt = _clean_format(content)
+                    if 2 < len(fmt) < 60:
+                        result["naming_format"] = fmt
+                        break
+            if result["naming_format"]:
+                break
 
     # ---- 策略3：前策略2的宽松版，匹配关键词后的内容并验证 ----
     if not result["naming_format"]:
@@ -1945,9 +1941,10 @@ class App:
         已替换部分不会被后续短词再次匹配（避免"复旦大学"中的"大学"被二次替换）。
         """
         school = (
-            self.grad_school.get().strip() or
-            self.user_school.get().strip()
+            self.user_school.get().strip() or
+            self.grad_school.get().strip()
         )
+        grad_school = self.grad_school.get().strip()
         undergrad_school = self.undergrad_school.get().strip()
         major = self.grad_major.get().strip()
         undergrad_major = self.undergrad_major.get().strip()
@@ -1966,13 +1963,13 @@ class App:
         # 格式: [(占位符, 替换值), ...]
         candidates = [
             # ===== 院校（研究生优先，其次通用学校）=====
-            ("研究生院校", self.grad_school.get().strip()),
-            ("硕士院校", self.grad_school.get().strip()),
+            ("研究生院校", grad_school),
+            ("硕士院校", grad_school),
             ("毕业院校", school),
             ("在读院校", school),
             ("所在院校", school),
             ("就读院校", school),
-            ("硕士学校", self.grad_school.get().strip()),
+            ("硕士学校", grad_school),
             ("本科院校", undergrad_school),
             ("本科学校", undergrad_school),
             ("本科学院", undergrad_school),
@@ -2055,9 +2052,12 @@ class App:
             ("实习期", duration),
             ("可实习时间", duration),
             # ===== 到岗 / 入职 =====
+            ("最快到岗日期", ("最快" + arrival) if arrival else ""),
+            ("最快到岗时间", ("最快" + arrival) if arrival else ""),
+            ("最早到岗日期", ("最早" + arrival) if arrival else ""),
+            ("最早到岗时间", ("最早" + arrival) if arrival else ""),
             ("预期到岗时间", arrival),
             ("预计到岗时间", arrival),
-            ("最早到岗时间", arrival),
             ("可到岗时间", arrival),
             ("到岗时间", arrival),
             ("到岗日期", arrival),
