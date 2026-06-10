@@ -16,6 +16,8 @@ import threading
 import sys
 import subprocess
 
+import ai_extractor
+
 # ---------------------------------------------------------------------------
 # 全局路径常量
 # ---------------------------------------------------------------------------
@@ -1715,6 +1717,14 @@ class App:
         self.graduation_time = tk.StringVar(value=self.personal.get("graduation_time", ""))
         self.user_grade = tk.StringVar(value=self.personal.get("grade", ""))
 
+        # AI 配置
+        self.ai_config = self.config.get("ai", {})
+        self.ai_enabled = tk.BooleanVar(value=self.ai_config.get("enabled", True))
+        self.ai_api_base = tk.StringVar(value=self.ai_config.get("api_base", "https://api.deepseek.com"))
+        self.ai_api_key = tk.StringVar(value=self.ai_config.get("api_key", ""))
+        self.ai_model = tk.StringVar(value=self.ai_config.get("model", "deepseek-chat"))
+        self._ai_section_visible = tk.BooleanVar(value=False)
+
         self.email_domains = [
             "@163.com", "@126.com", "@yeah.net", "@qq.com", "@foxmail.com",
             "@gmail.com", "@outlook.com", "@hotmail.com", "@sina.com", "@sohu.com",
@@ -1823,6 +1833,48 @@ class App:
         ))
 
         # ================================================================
+        # Section AI — AI 智能提取设置
+        # ================================================================
+        self.ai_toggle_btn = tk.Button(main, text="⚙ AI 设置", font=self.f_small,
+                                       command=self._toggle_ai_section)
+        self.ai_toggle_btn.pack(anchor=tk.W, pady=(0, 2))
+
+        self.ai_section = tk.LabelFrame(main, text="AI 智能提取设置", font=self.f_heading,
+                                         bg="#F0F0F0", padx=12, pady=10)
+
+        row_ai1 = tk.Frame(self.ai_section, bg="#F0F0F0")
+        row_ai1.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(row_ai1, text="API地址", font=self.f_body, bg="#F0F0F0").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Entry(row_ai1, textvariable=self.ai_api_base, width=36).pack(side=tk.LEFT)
+        tk.Label(row_ai1, text="模型", font=self.f_body, bg="#F0F0F0").pack(side=tk.LEFT, padx=(12, 6))
+        ttk.Entry(row_ai1, textvariable=self.ai_model, width=14).pack(side=tk.LEFT)
+
+        row_ai2 = tk.Frame(self.ai_section, bg="#F0F0F0")
+        row_ai2.pack(fill=tk.X)
+        tk.Label(row_ai2, text="API Key", font=self.f_body, bg="#F0F0F0").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Entry(row_ai2, textvariable=self.ai_api_key, width=36, show="•").pack(side=tk.LEFT)
+        self.ai_enable_cb = ttk.Checkbutton(
+            row_ai2, text="启用AI提取", variable=self.ai_enabled,
+        )
+        self.ai_enable_cb.pack(side=tk.LEFT, padx=(12, 0))
+        ai_info_lbl = tk.Label(
+            row_ai2, text="ⓘ", fg="#0066CC",
+            font=("{Microsoft YaHei}", 10, "bold"), cursor="hand2",
+            bg="#F0F0F0",
+        )
+        ai_info_lbl.pack(side=tk.LEFT, padx=(4, 0))
+        ToolTip(ai_info_lbl, (
+            "AI 提取使用大语言模型从招聘公告中智能识别信息，\n"
+            "比正则提取更准确，能处理各种格式的 JD。\n\n"
+            "支持的 API 服务商：\n"
+            "● DeepSeek（推荐）：https://api.deepseek.com\n"
+            "  → 注册地址 platform.deepseek.com，新用户送额度\n"
+            "● OpenAI：https://api.openai.com\n"
+            "● 其他兼容 OpenAI 接口的服务\n\n"
+            "如 AI 提取失败，会自动降级到正则提取方案。"
+        ))
+
+        # ================================================================
         # Section 2 — 个人信息
         # ================================================================
         c2 = tk.LabelFrame(main, text="个人信息", font=self.f_heading,
@@ -1907,7 +1959,9 @@ class App:
         btn_frame = tk.Frame(main, bg="#F0F0F0")
         btn_frame.pack(fill=tk.X, pady=(2, 8))
         tk.Button(btn_frame, text="智能提取", font=self.f_body, width=10,
-                  command=self._extract).pack(side=tk.LEFT, padx=(0, 8))
+                  command=self._extract).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(btn_frame, text="AI提取", font=self.f_body, width=10,
+                  command=self._extract_ai).pack(side=tk.LEFT, padx=(0, 6))
         self.send_btn = tk.Button(btn_frame, text="一键发送", font=self.f_body, width=10,
                                    command=self._send)
         self.send_btn.pack(side=tk.LEFT)
@@ -2112,6 +2166,87 @@ class App:
             return value_map.get(m.group(0), m.group(0))
 
         return re.sub(pattern, _replacer, fmt)
+
+    def _toggle_ai_section(self):
+        if self._ai_section_visible.get():
+            self.ai_section.pack_forget()
+            self.ai_toggle_btn.config(text="⚙ AI 设置")
+            self._ai_section_visible.set(False)
+        else:
+            self.ai_section.pack(fill=tk.X, pady=(0, 8), before=self.ai_toggle_btn)
+            self.ai_toggle_btn.config(text="▲ AI 设置")
+            self._ai_section_visible.set(True)
+
+    def _extract_ai(self):
+        text = self.job_text.get("1.0", tk.END).strip()
+        if not text:
+            self._log("⚠ 请先粘贴招聘信息到文本框")
+            return
+
+        if not self.ai_enabled.get():
+            self._log("⚠ AI 提取未启用，请在 AI 设置中开启")
+            return
+
+        ai_cfg = self._get_ai_config()
+        if not ai_cfg.get("api_key"):
+            self._log("⚠ 请先在 AI 设置中填写 API Key")
+            return
+
+        self._log("⏳ AI 正在分析招聘信息...")
+        try:
+            info = ai_extractor.extract_info_ai(text, ai_cfg)
+        except Exception as e:
+            self._log(f"⚠ AI 提取失败 ({e})，降级到正则提取")
+            self._extract()
+            return
+
+        if not any(info.values()):
+            self._log("⚠ AI 未提取到有效信息，降级到正则提取")
+            self._extract()
+            return
+
+        updates = []
+        if info["email"]:
+            self.to_email.set(info["email"])
+            updates.append(f"邮箱: {info['email']}")
+        if info["naming_format"]:
+            raw_fmt = info["naming_format"]
+            self.raw_naming_format = raw_fmt
+            filled_fmt = self._fill_template(raw_fmt, info)
+            self.naming_format.set(filled_fmt)
+            subject = re.sub(r"\.pdf$", "", filled_fmt, flags=re.IGNORECASE).strip()
+            self.email_subject.set(subject)
+            if filled_fmt != raw_fmt:
+                updates.append(f"命名格式: {raw_fmt} → {filled_fmt}")
+            else:
+                updates.append(f"命名格式: {filled_fmt}")
+        if info["company"]:
+            self.company_var.set(info["company"])
+            updates.append(f"公司: {info['company']}")
+        else:
+            self.company_var.set("")
+        if info["position"]:
+            self.position_var.set(info["position"])
+            updates.append(f"岗位: {info['position']}")
+        else:
+            self.position_var.set("")
+
+        if updates:
+            self._log("✓ AI 提取结果: " + " | ".join(updates))
+            if not info["email"]:
+                self._log("⚠ 未提取到邮箱，请手动填写")
+            if not info["naming_format"]:
+                self._log("⚠ 未提取到命名格式，请手动填写")
+        else:
+            self._log("⚠ AI 未能提取到有效信息")
+
+    def _get_ai_config(self):
+        return {
+            "enabled": self.ai_enabled.get(),
+            "api_base": self.ai_api_base.get().strip(),
+            "api_key": self.ai_api_key.get().strip(),
+            "model": self.ai_model.get().strip(),
+        }
 
     def _on_domain_selected(self, event=None):
         """域名下拉选择时更新完整邮箱地址。"""
@@ -2463,6 +2598,7 @@ class App:
         self.config["email"] = self.sender_email.get().strip()
         self.config["auth_code"] = self.auth_code.get().strip()
         self.config["resume_path"] = self.resume_path.get().strip()
+        self.config["ai"] = self._get_ai_config()
         self.config["personal"] = {
             "name": self.user_name.get().strip(),
             "phone": self.user_phone.get().strip(),
