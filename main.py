@@ -15,6 +15,8 @@ import shutil
 import threading
 import sys
 import subprocess
+import base64
+import ctypes
 
 import ai_extractor
 
@@ -128,14 +130,88 @@ def save_json(path, data):
 
 
 # ---------------------------------------------------------------------------
+# Windows DPAPI 加密 — 敏感字段存盘自动加密，只有当前Windows账号能解密
+# ---------------------------------------------------------------------------
+_CRYPT32 = ctypes.windll.crypt32
+_KERNEL32 = ctypes.windll.kernel32
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+_CRYPT32.CryptProtectData.argtypes = [
+    ctypes.POINTER(_DATA_BLOB), ctypes.c_wchar_p, ctypes.POINTER(_DATA_BLOB),
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(_DATA_BLOB),
+]
+_CRYPT32.CryptProtectData.restype = ctypes.c_bool
+_CRYPT32.CryptUnprotectData.argtypes = _CRYPT32.CryptProtectData.argtypes
+_CRYPT32.CryptUnprotectData.restype = ctypes.c_bool
+_KERNEL32.LocalFree.argtypes = [ctypes.c_void_p]
+_KERNEL32.LocalFree.restype = ctypes.c_void_p
+
+
+def _dpapi_encrypt(data: bytes) -> bytes:
+    blob_in = _DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)))
+    blob_out = _DATA_BLOB()
+    if not _CRYPT32.CryptProtectData(
+        ctypes.byref(blob_in), None, None, None, None, 0x1, ctypes.byref(blob_out)
+    ):
+        raise OSError("CryptProtectData failed")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        _KERNEL32.LocalFree(blob_out.pbData)
+
+
+def _dpapi_decrypt(data: bytes) -> bytes:
+    blob_in = _DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)))
+    blob_out = _DATA_BLOB()
+    if not _CRYPT32.CryptUnprotectData(
+        ctypes.byref(blob_in), None, None, None, None, 0x1, ctypes.byref(blob_out)
+    ):
+        raise OSError("CryptUnprotectData failed")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        _KERNEL32.LocalFree(blob_out.pbData)
+
+
+def _encrypt_value(plain: str) -> dict:
+    """将明文字符串加密为 {'encrypted': True, 'value': '<base64密文>'}"""
+    encrypted = _dpapi_encrypt(plain.encode("utf-8"))
+    return {"encrypted": True, "value": base64.b64encode(encrypted).decode("ascii")}
+
+
+def _decrypt_value(value):
+    """解密 — 兼容明文和加密两种格式"""
+    if isinstance(value, dict) and value.get("encrypted"):
+        cipher = base64.b64decode(value["value"])
+        return _dpapi_decrypt(cipher).decode("utf-8")
+    return value  # 旧格式明文
+
+
+# ---------------------------------------------------------------------------
 # 配置/历史记录的存取
 # ---------------------------------------------------------------------------
 def load_config():
-    return load_json(CONFIG_FILE, {"email": "", "auth_code": "", "resume_path": ""})
+    config = load_json(CONFIG_FILE, {"email": "", "auth_code": "", "resume_path": ""})
+    # 解密敏感字段（兼容旧明文格式，解密后自动升级为加密存储）
+    if config.get("auth_code"):
+        config["auth_code"] = _decrypt_value(config["auth_code"])
+    ai = config.get("ai")
+    if ai and ai.get("api_key"):
+        ai["api_key"] = _decrypt_value(ai["api_key"])
+    return config
 
 
 def save_config(config):
-    save_json(CONFIG_FILE, config)
+    # 深拷贝后加密敏感字段再写入，不修改内存中的原始 dict
+    safe = json.loads(json.dumps(config, ensure_ascii=False))
+    if safe.get("auth_code") and not (isinstance(safe["auth_code"], dict) and safe["auth_code"].get("encrypted")):
+        safe["auth_code"] = _encrypt_value(safe["auth_code"])
+    ai = safe.get("ai")
+    if ai and ai.get("api_key") and not (isinstance(ai["api_key"], dict) and ai["api_key"].get("encrypted")):
+        ai["api_key"] = _encrypt_value(ai["api_key"])
+    save_json(CONFIG_FILE, safe)
 
 
 def load_history():
@@ -1831,6 +1907,12 @@ class App:
             "● Outlook/Hotmail：Microsoft账户 → 安全性 →\n"
             "   应用密码"
         ))
+
+        # 安全说明
+        tk.Label(
+            main, text="授权码和 API Key 使用 Windows 系统级加密存储，仅当前电脑账号可解密，无泄露风险",
+            font=("{Microsoft YaHei}", 8), fg="#888888", bg="#F0F0F0",
+        ).pack(anchor=tk.W, pady=(2, 0))
 
         # ================================================================
         # Section AI — AI 智能提取设置
