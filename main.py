@@ -2245,9 +2245,12 @@ class App:
         if filled_fmt != raw_fmt:
             self._log(f"✓ 模板填充: {raw_fmt} → {filled_fmt}")
 
-        # 生成目标文件名
+        # 生成目标文件名（清理非法字符，防止 shutil.copy2 报 WinError 3）
         ext = os.path.splitext(resume)[1]
-        target_name = filled_fmt
+        target_name = re.sub(r'[\\/:*?"<>|]', '-', filled_fmt)
+        target_name = target_name.strip('. ')
+        if not target_name:
+            target_name = "简历"
         if not target_name.lower().endswith(ext.lower()):
             target_name += ext
         os.makedirs(RESUMES_DIR, exist_ok=True)
