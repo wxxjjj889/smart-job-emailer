@@ -909,9 +909,18 @@ def parse_resume_info(filename):
 
         # 毕业时间
         if not result["graduation_time"]:
-            if re.search(r"\d{4}\s*年?\s*\d{0,2}\s*月?\s*(毕业|届)", seg):
-                result["graduation_time"] = seg
-                continue
+            m = re.search(r"(\d{4})\s*年?\s*(\d{0,2})\s*月?\s*(毕业|届)", seg)
+            if m:
+                year = int(m.group(1))
+                if 2000 <= year <= 2099:
+                    month = m.group(2)
+                    suffix = m.group(3)
+                    if month:
+                        result["graduation_time"] = f"{year}年{month}月{suffix}"
+                    else:
+                        has_nian = "年" in m.group(0)
+                        result["graduation_time"] = f"{year}年{suffix}" if has_nian else f"{year}{suffix}"
+                    continue
             if re.search(r"(应届|往届|毕业(?!院校|学校|生|设计|论))", seg):
                 result["graduation_time"] = seg
                 continue
@@ -923,7 +932,7 @@ def parse_resume_info(filename):
                 continue
         # 缩写校名：非首段（非姓名）、纯中文2-10字、不含其他类别关键词
         if i > 0 and re.match(r"^[一-鿿]{2,10}$", seg):
-            if not re.search(r"(专业|方向|实习|入职|到岗|月|周|天|\d)", seg):
+            if not re.search(r"(专业|方向|实习|入职|到岗|月|周|天|\d|学硕|专硕|学士|硕士|博士|学位|研究)", seg):
                 schools.append(seg)
                 continue
 
@@ -965,6 +974,17 @@ def parse_resume_info(filename):
         elif not result["grad_major"]:
             result["grad_major"] = m
 
+    # 清理 graduation_time：从可能混入学位前缀的值中提取有效年份
+    if result["graduation_time"]:
+        gt = result["graduation_time"]
+        m = re.search(r"(20\d{2})", gt)
+        if m:
+            year = m.group(1)
+            if "毕业" in gt:
+                result["graduation_time"] = f"{year}毕业"
+            elif "届" in gt:
+                result["graduation_time"] = f"{year}届"
+
     return result
 
 
@@ -998,6 +1018,55 @@ def send_email(sender_email, auth_code, to_email, subject, body, attachment_path
     finally:
         if server:
             server.quit()
+
+
+# ---------------------------------------------------------------------------
+# 右键上下文菜单工具函数
+# ---------------------------------------------------------------------------
+def _select_all(widget):
+    try:
+        if isinstance(widget, tk.Text):
+            widget.tag_add(tk.SEL, "1.0", tk.END)
+            widget.mark_set(tk.INSERT, "1.0")
+            widget.see(tk.INSERT)
+        else:
+            widget.select_range(0, tk.END)
+            widget.icursor(tk.END)
+    except Exception:
+        pass
+
+
+def bind_context_menu(widget, readonly=False):
+    def _popup(event):
+        menu = tk.Menu(widget, tearoff=0)
+        if not readonly:
+            menu.add_command(label="剪切", command=lambda: widget.event_generate("<<Cut>>"))
+        menu.add_command(label="复制", command=lambda: widget.event_generate("<<Copy>>"))
+        if not readonly:
+            menu.add_command(label="粘贴", command=lambda: widget.event_generate("<<Paste>>"))
+        menu.add_separator()
+        menu.add_command(label="全选", command=lambda: _select_all(widget))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    widget.bind("<Button-3>", _popup)
+
+
+def apply_context_menus(parent):
+    for child in parent.winfo_children():
+        if isinstance(child, scrolledtext.ScrolledText):
+            is_disabled = str(child.cget("state")) == "disabled"
+            bind_context_menu(child, readonly=is_disabled)
+        elif isinstance(child, ttk.Combobox):
+            is_ro = str(child.cget("state")) == "readonly"
+            bind_context_menu(child, readonly=is_ro)
+        elif isinstance(child, ttk.Entry):
+            st = str(child.cget("state"))
+            is_ro = st in ("readonly", "disabled")
+            bind_context_menu(child, readonly=is_ro)
+        apply_context_menus(child)
 
 
 # ---------------------------------------------------------------------------
@@ -1139,6 +1208,9 @@ class HistoryWindow:
         # Double-click: col #1 to edit, col #4 to open resume
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Motion>", self._on_tree_motion)
+
+        apply_context_menus(main)
+
         self._edit_entry = None
 
     def _parse_date(self, text):
@@ -1531,6 +1603,7 @@ class HistoryWindow:
         entry.insert(0, RESUMES_DIR)
         entry.select_range(0, tk.END)
         entry.focus_set()
+        bind_context_menu(entry, readonly=True)
         tk.Button(f, text="关闭", font=self.f_small,
                   command=dlg.destroy).pack()
         dlg.transient(self.win)
@@ -1581,6 +1654,7 @@ class HistoryWindow:
 
         self._edit_entry.bind("<Return>", self._finish_edit)
         self._edit_entry.bind("<FocusOut>", self._finish_edit)
+        bind_context_menu(self._edit_entry)
 
     def _on_tree_motion(self, event):
         col = self.tree.identify_column(event.x)
@@ -2064,6 +2138,8 @@ class App:
         )
         self.log_area.pack(fill=tk.BOTH, expand=True)
 
+        apply_context_menus(main)
+
     def _log(self, msg):
         self.log_area.config(state=tk.NORMAL)
         self.log_area.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
@@ -2088,6 +2164,15 @@ class App:
         duration = self.internship_duration.get().strip()
         arrival = self.arrival_time.get().strip()
         grad_time = self.graduation_time.get().strip()
+        # 清洗：从可能混入学位前缀的值中提取有效20xx年份
+        if grad_time:
+            m = re.search(r"(20\d{2})", grad_time)
+            if m:
+                year = m.group(1)
+                if "毕业" in grad_time:
+                    grad_time = f"{year}毕业"
+                elif "届" in grad_time:
+                    grad_time = f"{year}届"
         name = self.user_name.get().strip()
         phone = self.user_phone.get().strip()
         email = self.sender_email.get().strip()
@@ -2100,15 +2185,20 @@ class App:
         candidates = [
             # ===== 院校（研究生优先，其次通用学校）=====
             ("研究生院校", grad_school),
+            ("研究生学校", grad_school),
+            ("研究生院", grad_school),
+            ("研究生", grad_school),
             ("硕士院校", grad_school),
+            ("硕士学校", grad_school),
+            ("硕士", grad_school),
             ("毕业院校", school),
             ("在读院校", school),
             ("所在院校", school),
             ("就读院校", school),
-            ("硕士学校", grad_school),
             ("本科院校", undergrad_school),
             ("本科学校", undergrad_school),
             ("本科学院", undergrad_school),
+            ("本科", undergrad_school),
             ("毕业学校", school),
             ("在读学校", school),
             ("所在学校", school),
@@ -2116,6 +2206,7 @@ class App:
             ("院校", school),
             ("大学", school),
             ("学院", school),
+            ("学校名称", school),
             ("学校", school),
             # ===== 专业（仅硕士专业）=====
             ("研究生专业", self.grad_major.get().strip()),
@@ -2123,8 +2214,10 @@ class App:
             ("本科专业", undergrad_major),
             ("所学专业", major),
             ("主修专业", major),
+            ("专业名称", major),
             ("专业", major),
             ("方向", major),
+            ("学科", major),
             # ===== 岗位 / 职位 =====
             ("应聘岗位", position),
             ("投递岗位", position),
@@ -2146,9 +2239,13 @@ class App:
             # ===== 姓名 =====
             ("中文姓名", name),
             ("你的姓名", name),
+            ("申请人姓名", name),
+            ("候选人姓名", name),
             ("姓名", name),
             ("名字", name),
             ("中文名", name),
+            ("全名", name),
+            ("申请人", name),
             # ===== 每周出勤（具体到泛化）=====
             ("每周可出勤天数", weekly),
             ("每周可实习天数", weekly),
@@ -2157,6 +2254,8 @@ class App:
             ("每周实习天数", weekly),
             ("每周到岗天数", weekly),
             ("每周上班天数", weekly),
+            ("每周可出勤x天", weekly),
+            ("每周可出勤X天", weekly),
             ("每周工作几天", weekly),
             ("可实习天数", weekly),
             ("每周出勤几天", weekly),
@@ -2165,6 +2264,8 @@ class App:
             ("每周几天出勤", weekly),
             ("每周几天到岗", weekly),
             ("每周几天", weekly),
+            ("每周实习x天", weekly),
+            ("每周实习X天", weekly),
             ("实习几天", weekly),
             ("每周天数", weekly),
             ("出勤几天", weekly),
@@ -2174,41 +2275,86 @@ class App:
             ("出勤天数", weekly),
             ("出勤时间", weekly),
             ("每周到岗", weekly),
+            ("每周x天出勤", weekly),
+            ("每周X天出勤", weekly),
+            ("一周x天", weekly),
+            ("一周X天", weekly),
+            ("一周几天", weekly),
+            ("一周出勤", weekly),
             ("出勤", weekly),
+            ("每周x天", weekly),
+            ("每周X天", weekly),
             ("每周", weekly),
+            ("天数", weekly),
+            ("几天", weekly),
             # ===== 实习时长 / 周期 =====
             ("计划实习月数", duration),
             ("可持续实习时间", duration),
+            ("可持续实习时长", duration),
+            ("可持续x个月", ("可持续" + duration) if duration else ""),
             ("可实习时长", duration),
+            ("可实习x个月", ("可实习" + duration) if duration else ""),
+            ("可实习X个月", ("可实习" + duration) if duration else ""),
+            ("可实习x月", ("可实习" + duration) if duration else ""),
+            ("可实习X月", ("可实习" + duration) if duration else ""),
+            ("可实习几个月", ("可实习" + duration) if duration else ""),
             ("实习周期", duration),
             ("实习期限", duration),
             ("实习时长", duration),
             ("实习时间", duration),
             ("实习月数", duration),
             ("实习期", duration),
+            ("实习x个月", duration),
+            ("实习X个月", duration),
+            ("实习x月", duration),
+            ("实习几个月", duration),
+            ("持续x个月", duration),
+            ("持续X个月", duration),
+            ("持续几个月", duration),
+            ("x个月", duration),
+            ("X个月", duration),
+            ("x月", duration),
+            ("X月", duration),
+            ("几个月", duration),
             ("可实习时间", duration),
+            ("时长", duration),
+            ("月数", duration),
             # ===== 到岗 / 入职 =====
-            ("最快到岗日期", ("最快" + arrival) if arrival else ""),
-            ("最快到岗时间", ("最快" + arrival) if arrival else ""),
-            ("最早到岗日期", ("最早" + arrival) if arrival else ""),
-            ("最早到岗时间", ("最早" + arrival) if arrival else ""),
+            ("可开始实习时间", ("可开始" + arrival) if arrival else ""),
+            ("开始实习时间", arrival),
+            ("最快到岗日期", arrival),
+            ("最快到岗时间", arrival),
+            ("最早到岗日期", arrival),
+            ("最早到岗时间", arrival),
             ("预期到岗时间", arrival),
             ("预计到岗时间", arrival),
             ("可到岗时间", arrival),
+            ("可入职时间", arrival),
             ("到岗时间", arrival),
             ("到岗日期", arrival),
             ("入职时间", arrival),
             ("入职日期", arrival),
+            ("报到时间", arrival),
+            ("上岗时间", arrival),
+            ("开始时间", arrival),
+            ("到岗", arrival),
             # ===== 毕业时间 =====
             ("预计毕业时间", grad_time),
             ("预期毕业时间", grad_time),
+            ("应届毕业时间", grad_time),
             ("毕业时间", grad_time),
             ("毕业年份", grad_time),
             ("毕业日期", grad_time),
+            ("毕业年月", grad_time),
+            ("毕业", grad_time),
+            ("应届", grad_time),
             # ===== 年级 =====
             ("在读年级", grade),
             ("所在年级", grade),
+            ("就读年级", grade),
             ("年级", grade),
+            ("届", grade),
+            ("级", grade),
             # ===== 联系方式 / 电话 =====
             ("联系电话", phone),
             ("手机号码", phone),
@@ -2216,8 +2362,10 @@ class App:
             ("联系方式", phone),
             ("联系手机", phone),
             ("手机号", phone),
+            ("电话号", phone),
             ("电话", phone),
             ("手机", phone),
+            ("Tel", phone),
             # ===== 邮箱 =====
             ("电子邮箱", email),
             ("邮箱地址", email),
@@ -2353,7 +2501,6 @@ class App:
             self.resume_path.set(path)
             self.config["resume_path"] = path
             save_config(self.config)
-            self._auto_fill_from_resume(path)
 
     def _auto_fill_from_resume(self, path):
         """选择简历文件后自动从文件名解析信息并回填到个人信息字段。"""
@@ -2482,8 +2629,8 @@ class App:
             return
 
         # 组装邮件内容并发起后台发送（含自动重试逻辑）
-        company = info["company"] or ""
-        position = info["position"] or ""
+        company = self.company_var.get().strip() or info.get("company", "")
+        position = self.position_var.get().strip() or info.get("position", "")
         subject = self.email_subject.get().strip() or "实习申请"
         body = "尊敬的招聘负责人，\n\n您好！\n\n请查收附件中的个人简历，期待您的回复。\n\n此致\n敬礼"
 
